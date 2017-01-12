@@ -79,6 +79,12 @@
 #define CONFIG_SPL_LZO_SUPPORT
 #endif
 
+#if defined(CONFIG_LTQ_SPL_COMP_LZMA)
+#define CONFIG_LZMA
+#define CONFIG_SPL_LZMA_SUPPORT
+#endif
+
+
 /* Basic commands */
 #define CONFIG_CMD_BDI
 #define CONFIG_CMD_EDITENV

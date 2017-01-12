@@ -35,14 +35,38 @@ static u8 spl_mc_tune_buf[CONFIG_SYS_NAND_PAGE_SIZE];
 static u8 spl_mc_tune_buf[sizeof(struct mc_tune_cfg)];
 #endif
 
+/* Emulated malloc area needed for LZMA allocator in BSS */
+static u8 *spl_mem_ptr __maybe_unused;
+static size_t spl_mem_size __maybe_unused;
+
+static int spl_is_comp_lzma(const struct spl_image *spl)
+{
+#if defined(CONFIG_LTQ_SPL_COMP_LZMA)
+		return spl->comp == IH_COMP_LZMA;
+#else
+		return 0;
+#endif
+}
+
+static int spl_is_comp_lzo(const struct spl_image *spl)
+{
+#if defined(CONFIG_LTQ_SPL_COMP_LZO)
+		return spl->comp == IH_COMP_LZO;
+#else
+		return 0;
+#endif
+}
+
 static int spl_is_compressed(const struct spl_image *spl)
 {
 	if (spl->comp == IH_COMP_NONE)
 		return 0;
 
-#if defined(CONFIG_LTQ_SPL_COMP_LZO)
-	return spl->comp == IH_COMP_LZO;
-#endif
+	if (spl_is_comp_lzma(spl))
+		return 1;
+
+	if (spl_is_comp_lzo(spl))
+		return 1;
 
 	spl_puts("SPL: unsupported compression type\n");
 
@@ -102,6 +126,24 @@ static int spl_check_data(const struct spl_image *spl, unsigned long addr)
 	return 1;
 }
 
+static void *spl_lzma_alloc(void *p, size_t size)
+{
+	u8 *ret;
+
+	if (size > spl_mem_size)
+		return NULL;
+
+	ret = spl_mem_ptr;
+	spl_mem_ptr += size;
+	spl_mem_size -= size;
+
+	return ret;
+}
+
+static void spl_lzma_free(void *p, void *addr)
+{
+}
+
 static int spl_copy_image(struct spl_image *spl, unsigned long addr)
 {
 	spl_puts("SPL: copying U-Boot to RAM\n");
@@ -112,7 +154,44 @@ static int spl_copy_image(struct spl_image *spl, unsigned long addr)
 	return 0;
 }
 
-static int spl_uncompress(struct spl_image *spl, unsigned long addr)
+static int spl_uncompress_lzma(struct spl_image *spl, unsigned long addr)
+{
+	SRes res;
+	const Byte *prop = (const Byte *) addr;
+	const Byte *src = (const Byte *) addr + LZMA_PROPS_SIZE +
+													sizeof(uint64_t);
+	Byte *dest = (Byte *) spl->entry_addr;
+	SizeT dest_len = 0;
+	SizeT src_len = spl->data_size - LZMA_PROPS_SIZE;
+	ELzmaStatus status = 0;
+	ISzAlloc alloc;
+	int i;
+
+	spl_puts("SPL: decompressing U-Boot with LZMA\n");
+
+	/* Read the uncompressed size */
+	for (i = 0; i < 4; i++) {
+		unsigned char b = *((const unsigned char*)addr + LZMA_PROPS_SIZE + i);
+
+		dest_len += (UInt32)(b) << (i * 8);
+	}
+
+	alloc.Alloc = spl_lzma_alloc;
+	alloc.Free = spl_lzma_free;
+	spl_mem_ptr = (u8 *) CONFIG_SPL_MALLOC_BASE;
+	spl_mem_size = CONFIG_SPL_MALLOC_MAX_SIZE;
+
+	res = LzmaDecode(dest, &dest_len, src, &src_len, prop, LZMA_PROPS_SIZE,
+			LZMA_FINISH_ANY, &status, &alloc);
+	if (res != SZ_OK)
+			return 1;
+
+	spl->entry_size = dest_len;
+
+	return 0;
+}
+
+static int spl_uncompress_lzo(struct spl_image *spl, unsigned long addr)
 {
 	size_t len = CONFIG_SYS_LOAD_SIZE;
 	int ret;
@@ -124,6 +203,20 @@ static int spl_uncompress(struct spl_image *spl, unsigned long addr)
 		(unsigned char *) spl->entry_addr, &len);
 
 	spl->entry_size = len;
+
+	return ret;
+}
+
+static int spl_uncompress(struct spl_image *spl, unsigned long addr)
+{
+	int ret;
+
+	if (spl_is_comp_lzma(spl))
+		ret = spl_uncompress_lzma(spl, addr);
+	else if (spl_is_comp_lzo(spl))
+		ret = spl_uncompress_lzo(spl, addr);
+	else
+		ret = 1;
 
 	return ret;
 }
